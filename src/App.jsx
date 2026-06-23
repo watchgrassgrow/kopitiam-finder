@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 
 // ── Injected at build time by GitHub Actions from repository secret ───────────
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY || ''
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`
 
 // ── Colours ───────────────────────────────────────────────────────────────────
 const C = {
@@ -56,7 +56,7 @@ function haversine(a, b, c, d) {
 }
 
 // ── Gemini API call with Google Search grounding ───────────────────────────────
-async function callGemini(prompt, useSearch = true) {
+async function callGemini(prompt, useSearch = true, retries = 3) {
   const body = {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.1, maxOutputTokens: 4096 },
@@ -64,15 +64,25 @@ async function callGemini(prompt, useSearch = true) {
   if (useSearch) {
     body.tools = [{ google_search: {} }]
   }
-  const resp = await fetch(GEMINI_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const data = await resp.json()
-  if (data.error) throw new Error(`Gemini error: ${data.error.message}`)
-  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || ''
-  return text
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const resp = await fetch(GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const data = await resp.json()
+    if (data.error) {
+      const msg = data.error.message || ''
+      const isRateLimit = msg.toLowerCase().includes('high demand') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('429') || resp.status === 429
+      if (isRateLimit && attempt < retries) {
+        await new Promise(r => setTimeout(r, attempt * 3000))
+        continue
+      }
+      throw new Error(`Gemini error: ${msg}`)
+    }
+    const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || ''
+    return text
+  }
 }
 
 // ── Parse JSON from Gemini response (strips markdown fences) ──────────────────
