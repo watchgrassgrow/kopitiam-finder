@@ -35,7 +35,6 @@ jobs:
 
       - name: Build
         env:
-          # Add GEMINI_API_KEY in: Settings → Secrets → Actions → New repository secret
           VITE_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: npm run build
 
