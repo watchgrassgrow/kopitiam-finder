@@ -102,23 +102,84 @@ lat must be 1.1-1.5, lng must be 103.5-104.1`
   return {...result, provider}
 }
 
+function svy21ToLatLng(N, E) {
+  const a=6378137,f=1/298.257223563,e2=2*f-f*f,e_2=e2/(1-e2)
+  const n0=38744.572,E0=28001.642,k0=1,oLat=1.366666,oLon=103.833333,oLatR=oLat*Math.PI/180
+  const n=f/(2-f),n2=n*n,n3=n2*n,n4=n3*n
+  const A=(a/(1+n))*(1+n2/4+n4/64)
+  const M0=A*(oLatR+(-3*n/2+9*n3/16)*Math.sin(2*oLatR)+(15*n2/16-15*n4/32)*Math.sin(4*oLatR)+(-35*n3/48)*Math.sin(6*oLatR)+(315*n4/512)*Math.sin(8*oLatR))
+  const Np=(N-n0)+k0*M0,Ep=(E-E0)/k0,pp=Np/(A*k0)
+  const p1=pp+(3*n/2-27*n3/32)*Math.sin(2*pp)+(21*n2/16-55*n4/32)*Math.sin(4*pp)+(151*n3/96)*Math.sin(6*pp)+(1097*n4/512)*Math.sin(8*pp)
+  const nu=a/Math.sqrt(1-e2*Math.sin(p1)*Math.sin(p1))
+  const t=Math.tan(p1),t2=t*t,ep2=e_2*Math.cos(p1)*Math.cos(p1)
+  const x=Ep/(nu*k0),x2=x*x
+  const lat=p1-(nu*t/(a*a/(1-e2*Math.sin(p1)*Math.sin(p1))))*(x2/2-x2*x2*(5+3*t2+ep2-9*t2*ep2)/24)
+  const lon=oLon*Math.PI/180+(x-x2*x*(1+2*t2+ep2)/6)/Math.cos(p1)
+  return{lat:lat*180/Math.PI,lng:lon*180/Math.PI}
+}
+function haversine(a,b,c,d){
+  const R=6371000,dL=(c-a)*Math.PI/180,dN=(d-b)*Math.PI/180
+  const e=Math.sin(dL/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dN/2)**2
+  return R*2*Math.atan2(Math.sqrt(e),Math.sqrt(1-e))
+}
+
 async function fetchCarparks(lat, lng, radiusM) {
-  const prompt = `You are a Singapore HDB carpark expert.
-
-Location: lat=${lat}, lng=${lng}, radius=${radiusM}m
-
-Use Google Search to fetch: https://api.data.gov.sg/v1/transport/carpark-availability
-
-List the 6-8 closest HDB carparks to this location within ${radiusM}m. Use your knowledge of Singapore carpark locations for this area.
-
-Return ONLY a JSON array (no markdown):
-[{"car_park_no":"SK1","address":"BLK 123 SENGKANG EAST AVE 1","car_park_type":"SURFACE CAR PARK","free_parking":"SUN & PH FR 7AM-10:30PM","night_parking":"YES","gantry_height":"2.1","distM":150,"availLots":45,"totalLots":200}]`
-
-  const {text, provider} = await callAI(prompt, true, 'carparks')
+  // Fetch directly from browser — no CORS issues on GitHub Pages
+  let availMap = {}
   try {
-    const result = parseJSON(text)
-    return {carparks: Array.isArray(result)?result:result.carparks||[], provider}
-  } catch { return {carparks:[], provider} }
+    const r = await fetch('https://api.data.gov.sg/v1/transport/carpark-availability')
+    const d = await r.json()
+    if (d.items?.[0]) {
+      d.items[0].carpark_data.forEach(cp => {
+        const total = cp.carpark_info.reduce((s,i)=>s+parseInt(i.total_lots||0),0)
+        const avail = cp.carpark_info.reduce((s,i)=>s+parseInt(i.lots_available||0),0)
+        availMap[cp.carpark_number] = {total, avail}
+      })
+    }
+  } catch(e) { console.warn('Availability fetch failed', e) }
+
+  let cpList = []
+  try {
+    const r = await fetch('https://data.gov.sg/api/action/datastore_search?resource_id=139a3035-e624-4f56-b63f-89ae28d4ae4c&limit=10000')
+    const d = await r.json()
+    if (d.result?.records) cpList = d.result.records
+  } catch(e) { console.warn('Carpark info fetch failed', e) }
+
+  if (cpList.length === 0) {
+    // Fallback: ask AI to estimate carparks
+    const prompt = `List 6 realistic HDB carparks within ${radiusM}m of Singapore coordinates (${lat}, ${lng}). Use your knowledge of Singapore carpark locations.
+Return ONLY a JSON array: [{"car_park_no":"SK1","address":"BLK 123 STREET","car_park_type":"SURFACE CAR PARK","free_parking":"SUN & PH FR 7AM-10:30PM","night_parking":"YES","gantry_height":"2.1","distM":150,"availLots":null,"totalLots":null}]`
+    const {text, provider} = await callAI(prompt, false, 'carparks-fallback')
+    try {
+      const result = parseJSON(text)
+      return {carparks: Array.isArray(result)?result:[], provider:'AI estimate'}
+    } catch { return {carparks:[], provider:'AI estimate'} }
+  }
+
+  // Filter by radius using SVY21 conversion
+  const nearby = []
+  for (const cp of cpList) {
+    const x=parseFloat(cp.x_coord), y=parseFloat(cp.y_coord)
+    if (isNaN(x)||isNaN(y)||x===0) continue
+    const coords = svy21ToLatLng(y, x)
+    const dist = haversine(lat, lng, coords.lat, coords.lng)
+    if (dist <= radiusM) {
+      const av = availMap[cp.car_park_no] || null
+      nearby.push({
+        car_park_no: cp.car_park_no,
+        address: cp.address,
+        car_park_type: cp.car_park_type,
+        free_parking: cp.free_parking,
+        night_parking: cp.night_parking,
+        gantry_height: cp.gantry_height,
+        distM: Math.round(dist),
+        availLots: av?.avail ?? null,
+        totalLots: av?.total ?? null,
+      })
+    }
+  }
+  nearby.sort((a,b)=>a.distM-b.distM)
+  return {carparks: nearby.slice(0,10), provider:'data.gov.sg'}
 }
 
 async function fetchPlaces(address, lat, lng, carparks) {
