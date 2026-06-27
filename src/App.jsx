@@ -135,15 +135,19 @@ async function fetchCarparks(lat, lng, radiusM) {
         const avail = cp.carpark_info.reduce((s,i)=>s+parseInt(i.lots_available||0),0)
         availMap[cp.carpark_number] = {total, avail}
       })
+      console.log(`[Carparks] Availability loaded: ${Object.keys(availMap).length} carparks`)
     }
-  } catch(e) { console.warn('Availability fetch failed', e) }
+  } catch(e) { console.warn('[Carparks] Availability fetch failed:', e) }
 
   let cpList = []
   try {
     const r = await fetch('https://data.gov.sg/api/action/datastore_search?resource_id=139a3035-e624-4f56-b63f-89ae28d4ae4c&limit=10000')
     const d = await r.json()
-    if (d.result?.records) cpList = d.result.records
-  } catch(e) { console.warn('Carpark info fetch failed', e) }
+    if (d.result?.records) {
+      cpList = d.result.records
+      console.log(`[Carparks] Info loaded: ${cpList.length} records`)
+    }
+  } catch(e) { console.warn('[Carparks] Info fetch failed:', e) }
 
   if (cpList.length === 0) {
     // Fallback: ask AI to estimate carparks
@@ -183,24 +187,40 @@ Return ONLY a JSON array: [{"car_park_no":"SK1","address":"BLK 123 STREET","car_
 }
 
 async function fetchPlaces(address, lat, lng, carparks) {
-  const cpList = carparks.slice(0,8).map((cp,i)=>
-    `#${i+1} ${cp.car_park_no}: ${cp.address}, type=${cp.car_park_type}, free=${cp.free_parking}, night=${cp.night_parking}, dist=${cp.distM}m, lots=${cp.availLots??'?'}/${cp.totalLots??'?'}`
+  const cpSummary = carparks.slice(0,8).map((cp,i)=>
+    `#${i+1} carpark_no="${cp.car_park_no}" address="${cp.address}" type="${cp.car_park_type}" free="${cp.free_parking}" night="${cp.night_parking}" distM=${cp.distM} availLots=${cp.availLots??'?'} totalLots=${cp.totalLots??'?'}`
   ).join('\n')
+
+  const validNos = carparks.slice(0,8).map(cp=>cp.car_park_no).join(', ')
 
   const prompt = `You are a Singapore local food guide.
 
 Location: "${address}" (${lat}, ${lng})
-Nearby HDB carparks:
-${cpList||'No carpark data — estimate from area knowledge'}
 
-Suggest 6 realistic affordable eating places (coffeeshops, hawker centres, food courts). Pair each with one carpark above.
+Real HDB carparks found nearby (use EXACTLY these carpark_no values):
+${cpSummary||'No real carparks found — set carpark_no to null'}
+
+Valid carpark_no values you MUST use: ${validNos||'none'}
+
+Suggest 6 realistic affordable eating places (coffeeshops, hawker centres, food courts) near "${address}". 
+For each place, assign the closest carpark from the list above using its EXACT carpark_no value.
+Do NOT invent new carpark numbers. Only use: ${validNos||'null'}.
 
 Return ONLY a JSON array (no markdown):
-[{"name":"Name","type":"Coffeeshop","address":"BLK 123 Street","distance_m":120,"avg_spend":"$3-5 per pax","famous_for":"Kaya toast, Wonton mee","open_hours":"6am-10pm","crowd_level":"Moderate","emoji":"☕","tips":"Local tip","carpark_no":"SK1","carpark_walk_m":80}]`
+[{"name":"Name","type":"Coffeeshop","address":"BLK 123 Street","distance_m":120,"avg_spend":"$3-5 per pax","famous_for":"Kaya toast, Wonton mee","open_hours":"6am-10pm","crowd_level":"Moderate","emoji":"☕","tips":"Local tip","carpark_no":"EXACT_NO_FROM_LIST","carpark_walk_m":80}]`
 
   const {text, provider} = await callAI(prompt, false, 'places')
   const result = parseJSON(text)
-  return {places: Array.isArray(result)?result:result.places||[], provider}
+  const places = Array.isArray(result)?result:result.places||[]
+  // Validate carpark_no — must exist in our real carpark list
+  const validSet = new Set(carparks.map(cp=>cp.car_park_no))
+  places.forEach(p => {
+    if (p.carpark_no && !validSet.has(p.carpark_no)) {
+      console.warn(`[Places] AI used invalid carpark_no: ${p.carpark_no}, clearing`)
+      p.carpark_no = carparks[0]?.car_park_no || null
+    }
+  })
+  return {places, provider}
 }
 
 function PipeStep({icon,label,detail,state}) {
