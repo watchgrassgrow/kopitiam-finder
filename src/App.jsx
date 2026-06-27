@@ -80,25 +80,84 @@ async function callAI(prompt, useSearch=true, label='') {
   return {text, provider:'Groq'}
 }
 
+// Singapore postal district → approximate lat/lng centroid
+const POSTAL_DISTRICTS = {
+  '01':[ 1.2796,103.8509],'02':[1.2802,103.8491],'03':[1.2891,103.8349],
+  '04':[1.2713,103.8193],'05':[1.2962,103.7922],'06':[1.2938,103.8466],
+  '07':[1.3000,103.8558],'08':[1.3098,103.8644],'09':[1.3138,103.8279],
+  '10':[1.3163,103.8075],'11':[1.3239,103.8138],'12':[1.3282,103.8447],
+  '13':[1.3195,103.8701],'14':[1.3107,103.8929],'15':[1.3050,103.9030],
+  '16':[1.3340,103.9270],'17':[1.3667,103.9458],'18':[1.3802,103.9459],
+  '19':[1.3502,103.8971],'20':[1.3352,103.8461],'21':[1.3328,103.7756],
+  '22':[1.3631,103.7208],'23':[1.3779,103.7446],'24':[1.4139,103.7916],
+  '25':[1.3859,103.8385],'26':[1.3925,103.8329],'27':[1.4183,103.8359],
+  '28':[1.3596,103.8706],'29':[1.3617,103.8860],'30':[1.3494,103.8819],
+  '31':[1.3352,103.8870],'32':[1.3499,103.9099],'33':[1.3629,103.9059],
+  '34':[1.3744,103.9133],'35':[1.3730,103.9386],'36':[1.3870,103.9348],
+  '37':[1.3972,103.9091],'38':[1.3895,103.8955],'39':[1.3859,103.8768],
+  '40':[1.3728,103.8703],'41':[1.3672,103.8548],'42':[1.3692,103.9580],
+  '43':[1.3501,103.8192],'44':[1.3377,103.7901],'45':[1.3622,103.7649],
+  '46':[1.3781,103.7701],'47':[1.3780,103.7497],'48':[1.3989,103.7462],
+  '49':[1.4210,103.7809],'50':[1.4327,103.7857],'51':[1.4444,103.7975],
+  '52':[1.3706,103.8451],'53':[1.3827,103.8700],'54':[1.3907,103.8951],
+  '55':[1.3941,103.9119],'56':[1.3823,103.9358],'57':[1.3577,103.9506],
+  '58':[1.3356,103.9644],'59':[1.3227,103.9641],'60':[1.2969,103.7630],
+  '61':[1.3222,103.7458],'62':[1.3441,103.7233],'63':[1.3540,103.7128],
+  '64':[1.3234,103.6932],'65':[1.3377,103.7036],'66':[1.3556,103.7346],
+  '67':[1.3750,103.7080],'68':[1.3908,103.7458],'69':[1.3993,103.7633],
+  '70':[1.3262,103.9037],'71':[1.3069,103.9066],'72':[1.2974,103.8791],
+  '73':[1.2847,103.8353],'75':[1.2650,103.8188],'76':[1.2740,103.8509],
+  '77':[1.2624,103.8273],'78':[1.2591,103.8201],'79':[1.2684,103.7972],
+  '80':[1.3050,103.8550],'81':[1.3222,103.9458],'82':[1.3388,103.9316],
+}
+
 async function geocodeLocation(query) {
   const isPostal = /^\d{6}$/.test(query.trim())
-  const prompt = `You are a Singapore geocoding assistant with deep knowledge of Singapore addresses.
+
+  // For postal codes: get district hint for validation
+  let districtHint = null
+  let hintLat = null, hintLng = null
+  if (isPostal) {
+    const district = query.trim().substring(0,2)
+    if (POSTAL_DISTRICTS[district]) {
+      [hintLat, hintLng] = POSTAL_DISTRICTS[district]
+      districtHint = `Postal district ${district} is approximately near lat=${hintLat}, lng=${hintLng}`
+    }
+  }
+
+  const prompt = `You are a Singapore geocoding assistant. You MUST return precise coordinates.
 
 ${isPostal
   ? `Resolve Singapore postal code: ${query}
-Use Google Search to find the exact address for this postal code.
-Also search OneMap: https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${query}&returnGeom=Y&getAddrDetails=Y`
-  : `Find coordinates for: "${query}" in Singapore using Google Search.`}
+${districtHint ? `IMPORTANT HINT: ${districtHint}. Your answer must be near these coordinates.` : ''}
+Use Google Search to fetch: https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${query}&returnGeom=Y&getAddrDetails=Y&pageNum=1
+Extract LATITUDE and LONGITUDE from the first result's LATITUDE and LONGITUDE fields.`
+  : `Find precise coordinates for: "${query}" in Singapore.
+Use Google Search to look this up on OneMap or Google Maps.`}
 
-Return ONLY this JSON (no markdown):
-{"lat":1.3521,"lng":103.8198,"address":"full address","postal":"${isPostal?query:'postal if found'}"}
+Return ONLY this JSON (no markdown, no explanation):
+{"lat":1.3521,"lng":103.8198,"address":"exact street address","postal":"${isPostal?query:'6-digit postal if found'}"}
 
-lat must be 1.1-1.5, lng must be 103.5-104.1`
+CRITICAL: lat must be 1.1–1.5, lng must be 103.5–104.1. Be precise to 4+ decimal places.`
 
   const {text, provider} = await callAI(prompt, true, 'geocode')
   const result = parseJSON(text)
   if (!result.lat||!result.lng) throw new Error('Could not resolve location')
-  if (result.lat<1.1||result.lat>1.5) throw new Error(`Invalid coordinates: ${result.lat},${result.lng}`)
+  if (result.lat<1.1||result.lat>1.5||result.lng<103.5||result.lng>104.1)
+    throw new Error(`Invalid coordinates: ${result.lat}, ${result.lng}`)
+
+  // Validate against district hint — if >3km off, override with district centroid + warn
+  if (hintLat && hintLng) {
+    const R=6371000, dL=(result.lat-hintLat)*Math.PI/180, dN=(result.lng-hintLng)*Math.PI/180
+    const a=Math.sin(dL/2)**2+Math.cos(hintLat*Math.PI/180)*Math.cos(result.lat*Math.PI/180)*Math.sin(dN/2)**2
+    const distFromHint = R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))
+    console.log(`[Geocode] Returned coords are ${Math.round(distFromHint)}m from district centroid`)
+    if (distFromHint > 3000) {
+      console.warn(`[Geocode] Coords seem wrong (${distFromHint}m from district ${query.substring(0,2)} centroid), using district centroid`)
+      return {...result, lat:hintLat, lng:hintLng, provider, note:'district-centroid-fallback'}
+    }
+  }
+
   return {...result, provider}
 }
 
