@@ -161,10 +161,14 @@ Return ONLY a JSON array: [{"car_park_no":"SK1","address":"BLK 123 STREET","car_
   }
 
   // Filter by radius using SVY21 conversion
+  console.log(`[Carparks] Searching near lat=${lat}, lng=${lng}, radius=${radiusM}m`)
+  console.log(`[Carparks] Sample record:`, cpList[0])
+
   const nearby = []
   for (const cp of cpList) {
     const x=parseFloat(cp.x_coord), y=parseFloat(cp.y_coord)
     if (isNaN(x)||isNaN(y)||x===0) continue
+    // SVY21: x_coord = Easting, y_coord = Northing
     const coords = svy21ToLatLng(y, x)
     const dist = haversine(lat, lng, coords.lat, coords.lng)
     if (dist <= radiusM) {
@@ -183,6 +187,19 @@ Return ONLY a JSON array: [{"car_park_no":"SK1","address":"BLK 123 STREET","car_
     }
   }
   nearby.sort((a,b)=>a.distM-b.distM)
+  console.log(`[Carparks] Found ${nearby.length} within ${radiusM}m`)
+  if (nearby.length === 0) {
+    // Debug: show closest 3 regardless of radius
+    const all = cpList
+      .filter(cp => parseFloat(cp.x_coord) && parseFloat(cp.y_coord))
+      .map(cp => {
+        const coords = svy21ToLatLng(parseFloat(cp.y_coord), parseFloat(cp.x_coord))
+        return {...cp, distM: Math.round(haversine(lat, lng, coords.lat, coords.lng)), coords}
+      })
+      .sort((a,b)=>a.distM-b.distM)
+      .slice(0,3)
+    console.log('[Carparks] Closest 3 (any distance):', all.map(c=>`${c.car_park_no} ${c.address} ${c.distM}m lat=${c.coords.lat.toFixed(5)} lng=${c.coords.lng.toFixed(5)}`))
+  }
   return {carparks: nearby.slice(0,10), provider:'data.gov.sg'}
 }
 
